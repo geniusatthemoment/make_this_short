@@ -8,7 +8,7 @@ from typing import Optional
 
 import redis.asyncio as redis
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, HttpUrl
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from sqlalchemy import Boolean, DateTime, Integer, String, select
@@ -96,8 +96,16 @@ app = FastAPI(title="shortener-service", version="0.1.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
-    path = request.url.path
+    raw_path = request.url.path
     method = request.method
+
+    if raw_path.startswith("/links/"):
+        path = "/links/{short_code}"
+    elif raw_path not in {"/", "/health", "/metrics", "/links"} and raw_path.count("/") == 1:
+        path = "/{short_code}"
+    else:
+        path = raw_path
+
     start = time.perf_counter()
     status = "500"
     try:
@@ -131,7 +139,7 @@ async def metrics():
     async with SessionLocal() as session:
         result = await session.execute(select(Link).where(Link.is_active == True))
         ACTIVE_LINKS.set(len(result.scalars().all()))
-    return JSONResponse(content=generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/links", response_model=LinkResponse)
@@ -172,6 +180,7 @@ async def get_link(short_code: str):
 @app.get("/{short_code}")
 async def redirect_to_original(short_code: str):
     if short_code in {"health", "metrics", "links"}:
+        REDIRECT_ERRORS.labels(reason="reserved_path").inc()
         raise HTTPException(status_code=404, detail="not found")
 
     cached_url = None
